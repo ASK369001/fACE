@@ -1,10 +1,7 @@
 # fACE
 ===========================================
 
-Overview
---------
-
-The Interview Confidence Analyzer is a web-based application designed to help users practice and improve their interview skills by analyzing their eye contact and speech confidence in real-time. It leverages MediaPipe's Face Mesh library to track eye movement and provides feedback based on gaze stability, simulating natural eye contact in a virtual interview setting. The application runs entirely in the browser, ensuring privacy by processing all data locally.
+The fACE is a web-based application designed to help users practice and improve their interview skills by analyzing their eye contact and speech confidence in real-time. It leverages MediaPipe's Face Mesh library to track eye movement and provides feedback based on gaze stability, simulating natural eye contact in a virtual interview setting. The application runs entirely in the browser, ensuring privacy by processing all data locally.
 
 ### Key Features
 
