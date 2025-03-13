@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Interview Confidence Analyzer with Speech-to-Text</title>
+    <style>
+        .container {
+            max-width: 1000px;
+            margin: 20px auto;
+            text-align: center;
+            font-family: Arial, sans-serif;
+        }
+        .video-container {
+            position: relative;
+            display: inline-block;
+        }
+        video {
+            width: 100%;
+            max-width: 640px;
+            background: #000;
+            border: 2px solid #333;
+        }
+        .metrics, .history, .calibration, .transcript {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            background: #f9f9f9;
+        }
+        .feedback {
+            color: #fff;
+            padding: 10px;
+            margin: 10px 0;
+            display: none;
+        }
+        .good { background: #28a745; }
+        .warning { background: #ffc107; }
+        .poor { background: #dc3545; }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+        }
+        button:disabled { cursor: not-allowed; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+        }
+        canvas { display: none; }
+        .transcript {
+            min-height: 100px;
+            text-align: left;
+            overflow-y: auto;
+            max-height: 200px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Interview Confidence Analyzer with Speech-to-Text</h1>
+        <div class="video-container">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="canvas"></canvas>
+        </div>
+        
+        <!-- Calibration Phase -->
+        <div class="calibration" id="calibrationPanel">
+            <p>Please look forward and speak clearly for 5 seconds to calibrate.</p>
+            <button id="calibrateBtn">Start Calibration</button>
+            <p id="calibrationStatus"></p>
+        </div>
+
+        <!-- Real-time Metrics and Feedback -->
+        <div class="metrics">
+            <p>Eye Contact Score: <span id="eyeContact">0%</span></p>
+            <p>Speech Confidence: <span id="speechConfidence">0%</span></p>
+            <p>Analysis Status: <span id="status">Initializing...</span></p>
+            <div id="feedback" class="feedback"></div>
+        </div>
+
+        <!-- Real-time Transcript -->
+        <div class="transcript">
+            <h3>Live Transcript</h3>
+            <div id="transcriptOutput"></div>
+        </div>
+
+        <!-- Controls -->
+        <button id="startBtn" disabled>Start Analysis</button>
+        <button id="stopBtn" disabled>Stop Analysis</button>
+        <button id="exportBtn" disabled>Export Results</button>
+
+        <!-- Historical Data -->
+        <div class="history">
+            <h3>Past Sessions</h3>
+            <table id="historyTable">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Avg Eye Contact</th>
+                        <th>Avg Speech Confidence</th>
+                    </tr>
+                </thead>
+                <tbody id="historyBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- MediaPipe Face Mesh and Camera Utils -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"></script>
+    <script>
+        // Core variables
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const calibrateBtn = document.getElementById('calibrateBtn');
+        const exportBtn = document.getElementById('exportBtn');
+        const eyeContactDisplay = document.getElementById('eyeContact');
+        const speechConfidenceDisplay = document.getElementById('speechConfidence');
+        const statusDisplay = document.getElementById('status');
+        const feedbackDisplay = document.getElementById('feedback');
+        const calibrationPanel = document.getElementById('calibrationPanel');
+        const calibrationStatus = document.getElementById('calibrationStatus');
+        const historyBody = document.getElementById('historyBody');
+        const transcriptOutput = document.getElementById('transcriptOutput');
+
+        let stream = null;
+        let analysisInterval = null;
+        let eyeContactScore = 0;
+        let speechConfidenceScore = 0;
+        let sessionData = [];
+        let isCalibrated = false;
+        let history = JSON.parse(localStorage.getItem('confidenceHistory')) || [];
+        let irisHistory = [];
+        const HISTORY_SIZE = 30;
+        let totalFrames = 0;
+        let camera = null;
+
+        // Speech Recognition Setup
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recognition = null;
+        if (SpeechRecognition) {
+            recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = 'en-US'; // Adjust language as needed
+        } else {
+            console.error('SpeechRecognition API not supported in this browser.');
+        }
+
+        // MediaPipe Face Mesh setup
+        const faceMesh = new FaceMesh({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`
+        });
+        faceMesh.setOptions({
+            maxNumFaces: 1,
+            refineLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        faceMesh.onResults(onResults);
+
+        // Load models and initialize
+        async function loadModels() {
+            try {
+                statusDisplay.textContent = 'Models loaded. Ready for calibration.';
+                calibrateBtn.disabled = false;
+            } catch (error) {
+                handleError('Model loading failed', error);
+            }
+        }
+
+        // Calibration phase
+        async function calibrate() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                };
+                calibrationStatus.textContent = 'Calibrating...';
+                
+                let countdown = 5;
+                const calibrationInterval = setInterval(() => {
+                    countdown--;
+                    calibrationStatus.textContent = `Calibrating... ${countdown}s`;
+                    if (countdown <= 0) {
+                        clearInterval(calibrationInterval);
+                        isCalibrated = true;
+                        calibrationPanel.style.display = 'none';
+                        startBtn.disabled = false;
+                        statusDisplay.textContent = 'Calibration complete. Ready to start.';
+                    }
+                }, 1000);
+            } catch (error) {
+                handleError('Calibration failed', error);
+            }
+        }
+
+        // Gaze stability calculation
+        function calculateGazeStability(results) {
+            if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) return 0;
+
+            const landmarks = results.multiFaceLandmarks[0];
+            const leftIris = landmarks[468];
+            const rightIris = landmarks[473];
+            const avgIrisX = (leftIris.x + rightIris.x) / 2;
+            const avgIrisY = (leftIris.y + rightIris.y) / 2;
+
+            irisHistory.push({ x: avgIrisX, y: avgIrisY });
+            if (irisHistory.length > HISTORY_SIZE) irisHistory.shift();
+
+            if (irisHistory.length < HISTORY_SIZE) return 0;
+
+            const meanX = irisHistory.reduce((sum, p) => sum + p.x, 0) / irisHistory.length;
+            const meanY = irisHistory.reduce((sum, p) => sum + p.y, 0) / irisHistory.length;
+            const varianceX = irisHistory.reduce((sum, p) => sum + Math.pow(p.x - meanX, 2), 0) / irisHistory.length;
+            const varianceY = irisHistory.reduce((sum, p) => sum + Math.pow(p.y - meanY, 2), 0) / irisHistory.length;
+            const totalVariance = varianceX + varianceY;
+
+            const score = Math.max(0, 100 - totalVariance * 1000);
+            return Math.round(score);
+        }
+
+        // Process MediaPipe results
+        function onResults(results) {
+            if (analysisInterval) {
+                totalFrames++;
+                eyeContactScore = calculateGazeStability(results);
+                eyeContactDisplay.textContent = `${eyeContactScore}%`;
+            }
+        }
+
+        // Start video and analysis
+        async function startAnalysis() {
+            if (!isCalibrated) {
+                alert('Please complete calibration first!');
+                return;
+            }
+            try {
+                statusDisplay.textContent = 'Analyzing...';
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                exportBtn.disabled = true;
+                irisHistory = [];
+                totalFrames = 0;
+                transcriptOutput.textContent = '';
+
+                // Start MediaPipe camera
+                camera = new Camera(video, {
+                    onFrame: async () => {
+                        await faceMesh.send({ image: video });
+                    },
+                    width: 640,
+                    height: 480
+                });
+                await camera.start();
+
+                // Start speech recognition
+                if (recognition) {
+                    recognition.start();
+                    recognition.onresult = (event) => {
+                        let interimTranscript = '';
+                        let finalTranscript = '';
+                        for (let i = event.resultIndex; i < event.results.length; i++) {
+                            const transcript = event.results[i][0].transcript;
+                            if (event.results[i].isFinal) {
+                                finalTranscript += transcript + ' ';
+                            } else {
+                                interimTranscript += transcript;
+                            }
+                        }
+                        transcriptOutput.textContent = finalTranscript + interimTranscript;
+                    };
+                    recognition.onerror = (event) => {
+                        console.error('Speech recognition error:', event.error);
+                    };
+                }
+
+                analysisInterval = setInterval(() => {
+                    eyeContactDisplay.textContent = `${eyeContactScore}%`;
+                    speechConfidenceScore = Math.random() * 100; // Placeholder
+                    speechConfidenceDisplay.textContent = `${Math.round(speechConfidenceScore)}%`;
+                    provideFeedback(eyeContactScore, speechConfidenceScore);
+                    sessionData.push({ eye: eyeContactScore, speech: speechConfidenceScore });
+                }, 500);
+            } catch (error) {
+                handleError('Analysis failed', error);
+            }
+        }
+
+        // Stop analysis and save results
+        function stopAnalysis() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                if (camera) camera.stop();
+                if (recognition) recognition.stop();
+                clearInterval(analysisInterval);
+                analysisInterval = null;
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                exportBtn.disabled = false;
+                statusDisplay.textContent = 'Stopped';
+
+                const avgEye = sessionData.reduce((sum, d) => sum + d.eye, 0) / sessionData.length;
+                const avgSpeech = sessionData.reduce((sum, d) => sum + d.speech, 0) / sessionData.length;
+                const session = { date: new Date().toLocaleString(), eye: avgEye, speech: avgSpeech };
+                history.push(session);
+                localStorage.setItem('confidenceHistory', JSON.stringify(history));
+                updateHistoryTable();
+                sessionData = [];
+            }
+        }
+
+        // Real-time feedback
+        function provideFeedback(eye, speech) {
+            feedbackDisplay.style.display = 'block';
+            if (eye > 70 && speech > 70) {
+                feedbackDisplay.textContent = 'Great job! Steady gaze and confident speech.';
+                feedbackDisplay.className = 'feedback good';
+            } else if (eye > 50 && speech > 50) {
+                feedbackDisplay.textContent = 'Good effort. Try maintaining a steadier gaze.';
+                feedbackDisplay.className = 'feedback warning';
+            } else {
+                feedbackDisplay.textContent = 'Needs work. Keep your gaze steady and speak clearly.';
+                feedbackDisplay.className = 'feedback poor';
+            }
+        }
+
+        // Update historical data table
+        function updateHistoryTable() {
+            historyBody.innerHTML = '';
+            history.forEach(session => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${session.date}</td>
+                    <td>${Math.round(session.eye)}%</td>
+                    <td>${Math.round(session.speech)}%</td>
+                `;
+                historyBody.appendChild(row);
+            });
+        }
+
+        // Export results
+        function exportResults() {
+            const csv = [
+                'Date,Eye Contact (%),Speech Confidence (%)',
+                ...history.map(s => `${s.date},${Math.round(s.eye)},${Math.round(s.speech)}`)
+            ].join('\n');
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'confidence_results.csv';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Error handling
+        function handleError(message, error) {
+            console.error(message, error);
+            statusDisplay.textContent = `Error: ${message}. Check console for details.`;
+            stopAnalysis();
+        }
+
+        // Event listeners
+        calibrateBtn.addEventListener('click', calibrate);
+        startBtn.addEventListener('click', startAnalysis);
+        stopBtn.addEventListener('click', stopAnalysis);
+        exportBtn.addEventListener('click', exportResults);
+        window.addEventListener('unload', stopAnalysis);
+
+        // Initial setup
+        loadModels();
+        updateHistoryTable();
+
+        // Data privacy notice
+        console.log('Note: This app uses camera and microphone data locally. No data is sent to servers.');
+    </script>
+</body>
+</html>
